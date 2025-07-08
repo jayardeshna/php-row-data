@@ -1,13 +1,8 @@
 <?php
 require_once 'csv-data-parser.php';
-require_once 'vendor/autoload.php';
-
-use PhpOffice\PhpSpreadsheet\Spreadsheet;
-use PhpOffice\PhpSpreadsheet\Writer\Csv;
-use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 
 ini_set('max_execution_time', 0);
-ini_set('memory_limit', '2G');
+ini_set('memory_limit', '4G'); // Increased memory limit
 
 echo "=== RAW DATA CLEANER ===\n";
 echo "Converting raw pipe-delimited data to clean CSV format\n";
@@ -15,14 +10,13 @@ echo "Output folder: historical-cleaned\n";
 echo "Date: " . date('Y-m-d H:i:s') . "\n\n";
 
 // Configuration - Change these as needed
-$SINGLE_LOCATION = 'Location201565'; // Set to specific location or null for all locations
+$SINGLE_LOCATION = 'Location201555'; // Set to specific location or null for all locations
 $OUTPUT_FOLDER = 'historical-cleaned'; // Output folder name
 
 /**
- * Custom CSV generation function with custom output folder
+ * Memory-efficient CSV generation function with custom output folder
  */
 function parseAndGenerateCSVCustom($rawData, $fileType, $targetFolder, $outputFolder) {
-
     // Convert encoding
     $rawData = mb_convert_encoding($rawData, 'UTF-8', 'UTF-16LE');
 
@@ -37,42 +31,58 @@ function parseAndGenerateCSVCustom($rawData, $fileType, $targetFolder, $outputFo
     // Parse the pipe-delimited data
     $records = array_filter(explode('$|', $rawData));
 
+    // Free up memory
+    unset($rawData);
+
     // Header processing
     $headerRow = [];
     if (!empty($records[0])) {
         $headerRow = array_map('trim', explode('|@|', preg_replace('/[\x00-\x1F\x80-\xFF]/', '', $records[0])));
     }
 
-    $spreadsheet = new Spreadsheet();
-    $sheet = $spreadsheet->getActiveSheet();
-
-    // Write headers to the sheet
-    $colIndex = 1;
-    foreach ($headerRow as $header) {
-        $sheet->setCellValue(Coordinate::stringFromColumnIndex($colIndex) . '1', $header);
-        $colIndex++;
+    // Open file for writing
+    $handle = fopen($outputFileName, 'w');
+    if (!$handle) {
+        throw new Exception("Cannot create output file: $outputFileName");
     }
 
-    // Write data rows
-    $rowIndex = 2;
-    for ($i = 1; $i < count($records); $i++) {
-        $dataFields = array_map('trim', explode('|@|', $records[$i]));
-        $colIndex = 1;
-        foreach ($dataFields as $field) {
-            $cleanField = preg_replace('/[\x00-\x1F\x80-\xFF]/', '', $field);
-            $sheet->setCellValue(Coordinate::stringFromColumnIndex($colIndex) . $rowIndex, $cleanField);
-            $colIndex++;
+    // Write headers
+    if (!empty($headerRow)) {
+        fputcsv($handle, $headerRow);
+    }
+
+    // Process data rows in chunks to save memory
+    $chunkSize = 1000; // Process 1000 records at a time
+    $totalRecords = count($records);
+
+    for ($i = 1; $i < $totalRecords; $i += $chunkSize) {
+        $chunk = array_slice($records, $i, $chunkSize);
+
+        foreach ($chunk as $record) {
+            $dataFields = array_map('trim', explode('|@|', $record));
+            $cleanFields = [];
+
+            foreach ($dataFields as $field) {
+                $cleanFields[] = preg_replace('/[\x00-\x1F\x80-\xFF]/', '', $field);
+            }
+
+            fputcsv($handle, $cleanFields);
         }
-        $rowIndex++;
+
+        // Free memory for processed chunk
+        unset($chunk);
+
+        // Force garbage collection every 10 chunks
+        if ($i % (10 * $chunkSize) === 1) {
+            gc_collect_cycles();
+        }
     }
 
-    // Save as CSV
-    $writer = new Csv($spreadsheet);
-    $writer->setDelimiter(',');
-    $writer->setEnclosure('"');
-    $writer->setLineEnding("\r\n");
-    $writer->setSheetIndex(0);
-    $writer->save($outputFileName);
+    fclose($handle);
+
+    // Free remaining memory
+    unset($records);
+    gc_collect_cycles();
 
     return $outputFileName;
 }
